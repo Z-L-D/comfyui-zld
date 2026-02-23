@@ -1,0 +1,11 @@
+# ComfyUI EMAG Node Requirements
+# 
+# This custom node uses only PyTorch and standard ComfyUI dependencies.
+# No additional packages are required beyond a standard ComfyUI installation.
+#
+# Minimum requirements (should already be installed with ComfyUI):
+# - torch>=2.0.0
+# - numpy>=1.20.0
+#
+# The node is compatible with ComfyUI's existing infrastructure and
+# does not require any external dependencies.
