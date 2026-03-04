@@ -18,7 +18,7 @@ try:
 except ImportError:
     comfy_attention = None
 
-from .deconv_engine import (
+from .decon.deconv_engine import (
     make_disk_psf,
     make_gaussian_psf,
     make_motion_psf,
@@ -28,6 +28,8 @@ from .deconv_engine import (
     deconvolve_image,
     deconvolve_channel,
 )
+
+from .spectrum_core import SpectrumState
 
 
 class EMAGGuider:
@@ -490,6 +492,655 @@ class EMAGGuiderImpl(comfy.samplers.CFGGuider):
             return list(range(start, end))
         else:
             # For larger models (SD3, DiT-XL, Flux, LTX2), perturb layers 12-15
+            return list(range(12, min(n_layers, 16)))
+
+
+class EMASyncGuider:
+    """
+    EMAG + SyncCFG Hybrid Guider Node
+    Combines Exponential Moving Average Guidance with Synchronization-Enhanced CFG
+    for improved audio-video generation alignment.
+    
+    Modes:
+    - EMAG_ONLY: Standard EMAG guidance (original behavior)
+    - SYNCCFG_ONLY: Pure SyncCFG without EMA perturbation
+    - HYBRID: EMAG perturbation + SyncCFG guidance structure
+    
+    Based on: 
+    - "EMAG: Exponential Moving Average Guidance for Diffusion Models"
+    - "Harmony: Harmonizing Audio and Video Generation through Cross-Task Synergy"
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "mode": (["EMAG_ONLY", "SYNCCFG_ONLY", "HYBRID"], {
+                    "default": "HYBRID",
+                    "tooltip": "Guidance mode: EMAG_ONLY (original), SYNCCFG_ONLY (alignment-focused), HYBRID (both)"
+                }),
+                "cfg": ("FLOAT", {
+                    "default": 7.0, 
+                    "min": 0.0, 
+                    "max": 100.0, 
+                    "step": 0.1, 
+                    "round": 0.01,
+                    "tooltip": "Base CFG scale (w in standard CFG)"
+                }),
+                # EMAG parameters (used in EMAG_ONLY and HYBRID modes)
+                "emag_scale": ("FLOAT", {
+                    "default": 1.75, 
+                    "min": 0.0, 
+                    "max": 10.0, 
+                    "step": 0.01,
+                    "tooltip": "EMAG guidance scale (w_e in paper). Recommended: 1.75 for conditional, 5.125 for unconditional"
+                }),
+                "ema_decay": ("FLOAT", {
+                    "default": 0.9, 
+                    "min": 0.0, 
+                    "max": 0.999, 
+                    "step": 0.001,
+                    "tooltip": "EMA decay factor (lambda in Eq. 12). Higher = more smoothing"
+                }),
+                # SyncCFG parameters (used in SYNCCFG_ONLY and HYBRID modes)
+                "sync_scale": ("FLOAT", {
+                    "default": 3.0,
+                    "min": 0.0,
+                    "max": 20.0,
+                    "step": 0.1,
+                    "tooltip": "Synchronization guidance scale (s_sync in Harmony paper). Amplifies audio-video alignment"
+                }),
+                "video_scale": ("FLOAT", {
+                    "default": 3.0,
+                    "min": 0.0,
+                    "max": 20.0,
+                    "step": 0.1,
+                    "tooltip": "Video quality guidance scale (s_v). Lower than cfg to prevent over-amplification"
+                }),
+                "audio_scale": ("FLOAT", {
+                    "default": 2.0,
+                    "min": 0.0,
+                    "max": 20.0,
+                    "step": 0.1,
+                    "tooltip": "Audio quality guidance scale (s_a). Lower than cfg to prevent over-amplification"
+                }),
+                # Scheduling
+                "start_percent": ("FLOAT", {
+                    "default": 1.0, 
+                    "min": 0.0, 
+                    "max": 1.0, 
+                    "step": 0.01,
+                    "tooltip": "Start applying guidance at this percent of total steps (1.0 = beginning)"
+                }),
+                "end_percent": ("FLOAT", {
+                    "default": 0.2, 
+                    "min": 0.0, 
+                    "max": 1.0, 
+                    "step": 0.01,
+                    "tooltip": "Stop applying guidance at this percent of total steps (0.2 = last 20%)"
+                }),
+            },
+            "optional": {
+                "adaptive_layers": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Use adaptive layer selection for EMAG (recommended, see paper Section 4.3)"
+                }),
+                "perturb_img_to_text": ("BOOLEAN", {
+                    "default": True, 
+                    "label_on": "EMAG (Full)", 
+                    "label_off": "EMAG-I (Img Only)",
+                    "tooltip": "EMAG perturbs both Image->Image and Image->Text. EMAG-I only perturbs Image->Image"
+                }),
+                "separate_audio_video_cond": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Enable if you have separate audio and video conditionings for SyncCFG"
+                }),
+                "audio_positive": ("CONDITIONING", {
+                    "default": None,
+                    "tooltip": "Optional separate audio conditioning for SyncCFG mode"
+                }),
+                "video_positive": ("CONDITIONING", {
+                    "default": None,
+                    "tooltip": "Optional separate video conditioning for SyncCFG mode"
+                }),
+            }
+        }
+    
+    RETURN_TYPES = ("GUIDER",)
+    FUNCTION = "get_guider"
+    CATEGORY = "sampling/custom_sampling/guiders"
+    DESCRIPTION = "EMAG + SyncCFG Hybrid: Combines EMA attention perturbation with decoupled audio-video synchronization guidance for LTX-2 and other audio-video models"
+    
+    def get_guider(self, model, positive, negative, mode, cfg, emag_scale, ema_decay,
+                   sync_scale, video_scale, audio_scale,
+                   start_percent, end_percent, adaptive_layers=True, 
+                   perturb_img_to_text=True, separate_audio_video_cond=False,
+                   audio_positive=None, video_positive=None):
+        """Create and return the EMAG+SyncCFG hybrid guider instance"""
+        
+        # Validate conditioning inputs for SyncCFG modes
+        if mode in ["SYNCCFG_ONLY", "HYBRID"] and separate_audio_video_cond:
+            if audio_positive is None or video_positive is None:
+                print("[EMASync] Warning: separate_audio_video_cond enabled but missing audio_positive or video_positive. Falling back to shared conditioning.")
+                separate_audio_video_cond = False
+        
+        guider = EMASyncGuiderImpl(
+            model_patcher=model,
+            mode=mode,
+            cfg=cfg,
+            emag_scale=emag_scale,
+            ema_decay=ema_decay,
+            sync_scale=sync_scale,
+            video_scale=video_scale,
+            audio_scale=audio_scale,
+            start_percent=start_percent,
+            end_percent=end_percent,
+            adaptive_layers=adaptive_layers,
+            perturb_img_to_text=perturb_img_to_text,
+            separate_audio_video_cond=separate_audio_video_cond
+        )
+        
+        # Set conditionings
+        guider.set_conds(positive, negative)
+        
+        # Store separate conditionings if provided
+        if separate_audio_video_cond and audio_positive is not None and video_positive is not None:
+            guider.audio_positive = audio_positive
+            guider.video_positive = video_positive
+        
+        guider.set_cfg(cfg)
+        return (guider,)
+
+
+class EMASyncGuiderImpl(comfy.samplers.CFGGuider):
+    """
+    Implementation of EMAG + SyncCFG hybrid guidance.
+    
+    SyncCFG Theory (from Harmony paper):
+    Standard CFG: ε = ε_uncond + s*(ε_cond - ε_uncond)
+    Problem: Amplifying (ε_cond - ε_uncond) improves quality but hurts sync
+    
+    SyncCFG decouples:
+    - ε_v: video generation path
+    - ε_a: audio generation path  
+    - ε_sync: synchronization alignment path
+    
+    Final: ε = ε_uncond + s_v*(ε_v - ε_uncond) + s_a*(ε_a - ε_uncond) + s_sync*(ε_sync - ε_uncond)
+    
+    Where ε_sync is computed to preserve audio-video correspondence.
+    """
+    
+    # Class-level keys for persistent state
+    _EMA_STATE_KEY = '_emasync_ema_state'
+    _EMA_STEP_KEY = '_emasync_step_counter'
+    _EMA_FIRST_TIMESTEP_KEY = '_emasync_first_timestep'
+    
+    def __init__(self, model_patcher, mode, cfg, emag_scale, ema_decay,
+                 sync_scale, video_scale, audio_scale,
+                 start_percent, end_percent, adaptive_layers, perturb_img_to_text,
+                 separate_audio_video_cond):
+        super().__init__(model_patcher)
+        
+        # Mode configuration
+        self.mode = mode
+        self.separate_audio_video_cond = separate_audio_video_cond
+        
+        # EMAG parameters
+        self.emag_scale = emag_scale
+        self.ema_decay = ema_decay
+        self.adaptive_layers = adaptive_layers
+        self.perturb_img_to_text = perturb_img_to_text
+        
+        # SyncCFG parameters
+        self.sync_scale = sync_scale
+        self.video_scale = video_scale
+        self.audio_scale = audio_scale
+        
+        # Scheduling
+        self.start_percent = start_percent
+        self.end_percent = end_percent
+        
+        # State
+        self._hook_handles = []
+        self.total_steps = None
+        
+        # Separate conditionings for SyncCFG
+        self.audio_positive = None
+        self.video_positive = None
+        
+    def _get_persistent_ema(self):
+        """Get or create persistent EMA state on model_patcher"""
+        if not hasattr(self.model_patcher, self._EMA_STATE_KEY):
+            setattr(self.model_patcher, self._EMA_STATE_KEY, {})
+        return getattr(self.model_patcher, self._EMA_STATE_KEY)
+    
+    def _get_persistent_step(self):
+        """Get persistent step counter"""
+        if not hasattr(self.model_patcher, self._EMA_STEP_KEY):
+            setattr(self.model_patcher, self._EMA_STEP_KEY, 0)
+        return getattr(self.model_patcher, self._EMA_STEP_KEY)
+    
+    def _set_persistent_step(self, step):
+        """Set persistent step counter"""
+        setattr(self.model_patcher, self._EMA_STEP_KEY, step)
+        
+    def _detect_new_generation(self, timestep):
+        """Detect if this is a new generation and reset EMA if needed"""
+        timestep_val = timestep.item() if isinstance(timestep, torch.Tensor) else float(timestep)
+        
+        if not hasattr(self.model_patcher, self._EMA_FIRST_TIMESTEP_KEY):
+            setattr(self.model_patcher, self._EMA_FIRST_TIMESTEP_KEY, timestep_val)
+            setattr(self.model_patcher, '_emasync_last_timestep', timestep_val)
+            return True
+        
+        last_timestep = getattr(self.model_patcher, '_emasync_last_timestep', 0.0)
+        
+        # Diffusion timesteps decrease over generation
+        if timestep_val > last_timestep + 0.01:
+            print(f"[EMASync] New generation detected ({timestep_val:.4f} > {last_timestep:.4f}). Resetting state.")
+            setattr(self.model_patcher, self._EMA_FIRST_TIMESTEP_KEY, timestep_val)
+            setattr(self.model_patcher, '_emasync_last_timestep', timestep_val)
+            return True
+        
+        setattr(self.model_patcher, '_emasync_last_timestep', timestep_val)
+        return False
+        
+    def predict_noise(self, x, timestep, model_options={}, seed=None):
+        """
+        Main prediction method implementing EMAG + SyncCFG hybrid logic.
+        """
+        # Detect new generation
+        is_new_gen = self._detect_new_generation(timestep)
+        if is_new_gen:
+            self._get_persistent_ema().clear()
+            self._set_persistent_step(0)
+        
+        ema_attention = self._get_persistent_ema()
+        current_step = self._get_persistent_step()
+        
+        if self.total_steps is None and 'sigmas' in model_options:
+            self.total_steps = len(model_options['sigmas']) - 1
+        
+        apply_guidance = self._should_apply(current_step)
+        
+        print(f"[EMASync] Mode={self.mode}, Step={current_step}, Apply={apply_guidance}")
+        
+        if not apply_guidance:
+            # Standard CFG fallback
+            result = super().predict_noise(x, timestep, model_options, seed)
+            self._set_persistent_step(current_step + 1)
+            return result
+        
+        # Route to appropriate implementation
+        if self.mode == "EMAG_ONLY":
+            result = self._predict_emag_only(x, timestep, model_options, ema_attention)
+        elif self.mode == "SYNCCFG_ONLY":
+            result = self._predict_synccfg_only(x, timestep, model_options)
+        else:  # HYBRID
+            result = self._predict_hybrid(x, timestep, model_options, ema_attention)
+        
+        self._set_persistent_step(current_step + 1)
+        return result
+    
+    def _predict_emag_only(self, x, timestep, model_options, ema_attention):
+        """Original EMAG implementation"""
+        negative_cond = self.conds.get("negative", None)
+        positive_cond = self.conds.get("positive", None)
+        
+        self._register_emag_hooks(ema_attention)
+        
+        try:
+            out_perturbed = comfy.samplers.calc_cond_batch(
+                self.inner_model, 
+                [negative_cond, positive_cond], 
+                x, 
+                timestep, 
+                model_options
+            )
+            cond_pred_perturbed = out_perturbed[1]
+            uncond_pred = out_perturbed[0]
+        finally:
+            self._remove_emag_hooks()
+        
+        out_standard = comfy.samplers.calc_cond_batch(
+            self.inner_model,
+            [positive_cond],
+            x,
+            timestep,
+            model_options
+        )
+        cond_pred_standard = out_standard[0]
+        
+        # Eq. 15 & 16 from EMAG paper
+        emag_guidance = cond_pred_standard + self.emag_scale * (cond_pred_standard - cond_pred_perturbed)
+        noise_pred = uncond_pred + self.cfg * (emag_guidance - uncond_pred)
+        
+        return noise_pred
+    
+    def _predict_synccfg_only(self, x, timestep, model_options):
+        """
+        Pure SyncCFG implementation without EMA perturbation.
+        
+        Implements decoupled guidance:
+        ε = ε_uncond + s_v*(ε_v - ε_uncond) + s_a*(ε_a - ε_uncond) + s_sync*(ε_sync - ε_uncond)
+        
+        For LTX-2, we assume the model has audio and video components that can be
+        guided separately while maintaining synchronization.
+        """
+        negative_cond = self.conds.get("negative", None)
+        
+        if self.separate_audio_video_cond and self.audio_positive is not None and self.video_positive is not None:
+            # Separate conditionings provided
+            audio_cond = self.audio_positive
+            video_cond = self.video_positive
+            # For sync, we use the joint conditioning (positive) or compute a sync-specific one
+            sync_cond = self.conds.get("positive", None)
+        else:
+            # Use same conditioning for all (degraded but functional)
+            joint_cond = self.conds.get("positive", None)
+            audio_cond = joint_cond
+            video_cond = joint_cond
+            sync_cond = joint_cond
+        
+        # Get unconditional prediction
+        out_uncond = comfy.samplers.calc_cond_batch(
+            self.inner_model,
+            [negative_cond],
+            x,
+            timestep,
+            model_options
+        )
+        uncond_pred = out_uncond[0]
+        
+        # Get conditional predictions
+        # Audio path
+        out_audio = comfy.samplers.calc_cond_batch(
+            self.inner_model,
+            [audio_cond],
+            x,
+            timestep,
+            model_options
+        )
+        audio_pred = out_audio[0]
+        
+        # Video path
+        out_video = comfy.samplers.calc_cond_batch(
+            self.inner_model,
+            [video_cond],
+            x,
+            timestep,
+            model_options
+        )
+        video_pred = out_video[0]
+        
+        # Sync path - for synchronization, we want the model to focus on alignment
+        # This can be implemented as a special conditioning or as the joint prediction
+        out_sync = comfy.samplers.calc_cond_batch(
+            self.inner_model,
+            [sync_cond],
+            x,
+            timestep,
+            model_options
+        )
+        sync_pred = out_sync[0]
+        
+        # Compute SyncCFG
+        # ε = ε_uncond + s_v*(ε_v - ε_uncond) + s_a*(ε_a - ε_uncond) + s_sync*(ε_sync - ε_uncond)
+        noise_pred = uncond_pred.clone()
+        
+        if self.video_scale > 0:
+            noise_pred += self.video_scale * (video_pred - uncond_pred)
+        
+        if self.audio_scale > 0:
+            noise_pred += self.audio_scale * (audio_pred - uncond_pred)
+        
+        if self.sync_scale > 0:
+            # The sync term helps maintain alignment between audio and video
+            # We compute it as the component that preserves correspondence
+            sync_guidance = sync_pred - uncond_pred
+            
+            # Optional: Project sync guidance to be orthogonal to video/audio guidance
+            # to ensure it only affects alignment, not quality
+            if self.video_scale > 0 or self.audio_scale > 0:
+                combined_quality = (self.video_scale * (video_pred - uncond_pred) + 
+                                  self.audio_scale * (audio_pred - uncond_pred))
+                combined_quality_norm = combined_quality.norm() + 1e-8
+                # Remove component of sync that's parallel to quality guidance
+                projection = (sync_guidance * combined_quality).sum() / (combined_quality_norm ** 2) * combined_quality
+                sync_guidance = sync_guidance - projection
+            
+            noise_pred += self.sync_scale * sync_guidance
+        
+        return noise_pred
+    
+    def _predict_hybrid(self, x, timestep, model_options, ema_attention):
+        """
+        HYBRID mode: EMAG perturbation + SyncCFG guidance structure.
+        
+        First applies EMA perturbation to create hard negatives,
+        then applies SyncCFG decoupled guidance on the perturbed predictions.
+        """
+        negative_cond = self.conds.get("negative", None)
+        
+        if self.separate_audio_video_cond and self.audio_positive is not None and self.video_positive is not None:
+            audio_cond = self.audio_positive
+            video_cond = self.video_positive
+            sync_cond = self.conds.get("positive", None)
+        else:
+            joint_cond = self.conds.get("positive", None)
+            audio_cond = joint_cond
+            video_cond = joint_cond
+            sync_cond = joint_cond
+        
+        # Register EMA hooks for perturbation
+        self._register_emag_hooks(ema_attention)
+        
+        try:
+            # Get perturbed predictions (with EMA hooks active)
+            # We need perturbed versions of uncond, audio, video, and sync
+            
+            # Batch all conditionings for efficiency
+            all_conds = [negative_cond, audio_cond, video_cond, sync_cond]
+            out_perturbed = comfy.samplers.calc_cond_batch(
+                self.inner_model,
+                all_conds,
+                x,
+                timestep,
+                model_options
+            )
+            
+            uncond_perturbed = out_perturbed[0]
+            audio_perturbed = out_perturbed[1]
+            video_perturbed = out_perturbed[2]
+            sync_perturbed = out_perturbed[3]
+            
+        finally:
+            self._remove_emag_hooks()
+        
+        # Get standard (non-perturbed) predictions
+        out_standard = comfy.samplers.calc_cond_batch(
+            self.inner_model,
+            all_conds,
+            x,
+            timestep,
+            model_options
+        )
+        
+        uncond_standard = out_standard[0]
+        audio_standard = out_standard[1]
+        video_standard = out_standard[2]
+        sync_standard = out_standard[3]
+        
+        # Apply EMAG to each prediction (Eq. 15 from EMAG paper)
+        # ε̃' = ε' + w_e * (ε - ε')
+        def apply_emag(standard, perturbed):
+            return standard + self.emag_scale * (standard - perturbed)
+        
+        uncond_emag = apply_emag(uncond_standard, uncond_perturbed)
+        audio_emag = apply_emag(audio_standard, audio_perturbed)
+        video_emag = apply_emag(video_standard, video_perturbed)
+        sync_emag = apply_emag(sync_standard, sync_perturbed)
+        
+        # Now apply SyncCFG structure with EMAG-enhanced predictions
+        # ε = ε_uncond + s_v*(ε_v - ε_uncond) + s_a*(ε_a - ε_uncond) + s_sync*(ε_sync - ε_uncond)
+        noise_pred = uncond_emag.clone()
+        
+        if self.video_scale > 0:
+            noise_pred += self.video_scale * (video_emag - uncond_emag)
+        
+        if self.audio_scale > 0:
+            noise_pred += self.audio_scale * (audio_emag - uncond_emag)
+        
+        if self.sync_scale > 0:
+            sync_guidance = sync_emag - uncond_emag
+            
+            # Orthogonal projection to isolate alignment component
+            if self.video_scale > 0 or self.audio_scale > 0:
+                combined_quality = (self.video_scale * (video_emag - uncond_emag) + 
+                                  self.audio_scale * (audio_emag - uncond_emag))
+                combined_quality_norm = combined_quality.norm() + 1e-8
+                projection = (sync_guidance * combined_quality).sum() / (combined_quality_norm ** 2) * combined_quality
+                sync_guidance = sync_guidance - projection
+            
+            noise_pred += self.sync_scale * sync_guidance
+        
+        return noise_pred
+    
+    def _should_apply(self, current_step):
+        """Check if guidance should be applied based on step schedule"""
+        if self.total_steps is None or self.total_steps == 0:
+            return True
+        
+        start_step = int(self.start_percent * self.total_steps)
+        end_step = int(self.end_percent * self.total_steps)
+        
+        # Apply between end_step and start_step (diffusion goes high->low noise)
+        return end_step <= current_step <= start_step
+    
+    def _register_emag_hooks(self, ema_attention):
+        """Register EMA perturbation hooks (same as original EMAG)"""
+        self._remove_emag_hooks()
+        
+        try:
+            model = self.model_patcher.model
+            blocks = self._find_transformer_blocks(model)
+            
+            if blocks is None:
+                print("[EMASync] Warning: Could not find transformer blocks")
+                return
+            
+            if self.adaptive_layers:
+                layers_to_perturb = self._select_layers_adaptive(blocks)
+            else:
+                layers_to_perturb = list(range(len(blocks)))
+            
+            for idx in layers_to_perturb:
+                if idx >= len(blocks):
+                    continue
+                block = blocks[idx]
+                self._hook_attention_modules(block, idx, ema_attention)
+            
+            print(f"[EMASync] Registered {len(self._hook_handles)} hooks on layers {layers_to_perturb}")
+                        
+        except Exception as e:
+            print(f"[EMASync] Warning: Could not register hooks: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _find_transformer_blocks(self, model):
+        """Find transformer blocks across different architectures"""
+        if hasattr(model, 'diffusion_model'):
+            dm = model.diffusion_model
+            for attr in ('transformer_blocks', 'joint_blocks', 'blocks'):
+                if hasattr(dm, attr):
+                    return getattr(dm, attr)
+        
+        for attr in ('transformer_blocks', 'joint_blocks', 'blocks'):
+            if hasattr(model, attr):
+                return getattr(model, attr)
+        
+        return None
+    
+    def _hook_attention_modules(self, block, layer_idx, ema_attention):
+        """Hook attention modules for EMA perturbation"""
+        # Self-attention
+        for attr_name in ('attn1', 'attn', 'self_attn'):
+            if hasattr(block, attr_name):
+                module = getattr(block, attr_name)
+                handle = module.register_forward_hook(
+                    self._make_emag_hook(layer_idx, 'self', ema_attention)
+                )
+                self._hook_handles.append(handle)
+                break
+        
+        # Cross-attention if enabled
+        if self.perturb_img_to_text:
+            for attr_name in ('attn2', 'cross_attn'):
+                if hasattr(block, attr_name):
+                    module = getattr(block, attr_name)
+                    handle = module.register_forward_hook(
+                        self._make_emag_hook(layer_idx, 'cross', ema_attention)
+                    )
+                    self._hook_handles.append(handle)
+                    break
+    
+    def _remove_emag_hooks(self):
+        """Remove all EMA hooks"""
+        for handle in self._hook_handles:
+            try:
+                handle.remove()
+            except:
+                pass
+        self._hook_handles.clear()
+    
+    def _make_emag_hook(self, layer_idx, attn_type, ema_attention):
+        """Create EMA perturbation hook"""
+        decay = self.ema_decay
+        
+        def hook(module, input, output):
+            if isinstance(output, tuple):
+                attn_output = output[0]
+                rest = output[1:]
+            else:
+                attn_output = output
+                rest = None
+            
+            key = f"layer_{layer_idx}_{attn_type}"
+            
+            if key in ema_attention:
+                ema_attn = ema_attention[key]
+                
+                if ema_attn.shape == attn_output.shape:
+                    old_ema = ema_attn
+                    new_ema = (decay * ema_attn + (1.0 - decay) * attn_output.detach())
+                    ema_attention[key] = new_ema
+                    
+                    if rest is not None:
+                        return (old_ema,) + rest
+                    else:
+                        return old_ema
+                else:
+                    print(f"[EMASync] Shape mismatch for {key}: {ema_attn.shape} vs {attn_output.shape}. Reinitializing.")
+                    ema_attention[key] = attn_output.detach().clone()
+                    return output
+            
+            ema_attention[key] = attn_output.detach().clone()
+            return output
+        
+        return hook
+    
+    def _select_layers_adaptive(self, blocks):
+        """Adaptive layer selection from EMAG paper"""
+        n_layers = len(blocks)
+        
+        if n_layers <= 12:
+            start = max(0, n_layers // 2 - 1)
+            end = min(n_layers, n_layers // 2 + 2)
+            return list(range(start, end))
+        else:
             return list(range(12, min(n_layers, 16)))
 
 
@@ -2483,9 +3134,236 @@ class FocusDeconvAdvanced:
         return (numpy_to_tensor(result),)
 
 
+log_spec = logging.getLogger("ComfyUI-Spectrum")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  1.  MODEL-OUTPUT LEVEL  – works with any DiT model
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SpectrumAcceleration:
+    """
+    Patches a MODEL to use Spectrum's Chebyshev forecasting at the
+    model-output level: on skip steps the entire denoiser call is
+    replaced by a predicted output, giving a clean ~2-5× speedup
+    with no model-specific code.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "num_steps": ("INT", {
+                    "default": 50, "min": 4, "max": 1000, "step": 1,
+                    "tooltip": "Must match the step count in your KSampler."
+                }),
+                "window_size": ("INT", {
+                    "default": 2, "min": 1, "max": 20, "step": 1,
+                    "tooltip": "Initial gap between full-compute steps (N). "
+                               "Larger = more aggressive skipping."
+                }),
+                "flex_window": ("FLOAT", {
+                    "default": 0.75, "min": 0.1, "max": 1.0, "step": 0.05,
+                    "tooltip": "Window growth factor (α). Smaller = windows grow "
+                               "faster = more skipping at later steps."
+                }),
+                "first_enhance": ("INT", {
+                    "default": 4, "min": 1, "max": 50, "step": 1,
+                    "tooltip": "Number of initial steps that always run the "
+                               "denoiser (bootstrap for the cache)."
+                }),
+                "chebyshev_bases": ("INT", {
+                    "default": 4, "min": 2, "max": 10, "step": 1,
+                    "tooltip": "Number of Chebyshev polynomial bases (m). "
+                               "Higher = more expressive but needs more cached points."
+                }),
+                "regularization": ("FLOAT", {
+                    "default": 0.1, "min": 0.001, "max": 10.0, "step": 0.01,
+                    "tooltip": "Ridge regression λ. Higher = smoother predictions."
+                }),
+                "spectral_weight": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Chebyshev vs linear-extrapolation mix (w). "
+                               "1.0 = pure Chebyshev, 0.5 = balanced blend. "
+                               "Lower values are more robust at high speedups."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "model_patches/acceleration"
+    DESCRIPTION = (
+        "Spectrum: Chebyshev polynomial feature forecasting for diffusion "
+        "sampling acceleration (CVPR 2026). Predicts denoiser outputs on "
+        "skip steps, achieving ~2-5× speedup with minimal quality loss."
+    )
+
+    def apply(self, model, num_steps, window_size, flex_window,
+              first_enhance, chebyshev_bases, regularization,
+              spectral_weight):
+
+        m = model.clone()
+
+        state = SpectrumState(
+            num_steps=num_steps,
+            m=chebyshev_bases,
+            lam=regularization,
+            w=spectral_weight,
+            window_size=window_size,
+            flex_window=flex_window,
+            first_enhance=first_enhance,
+        )
+
+        log_spec.info(
+            f"Spectrum: {num_steps} steps, "
+            f"{state.sched.compression:.2f}× compression, "
+            f"{len(state.sched._full)} full-compute steps: "
+            f"{sorted(state.sched._full)}"
+        )
+
+        def spectrum_wrapper(apply_model, params):
+            """
+            Wraps the denoiser call.  On full-compute steps we call the
+            real model and cache the output; on skip steps we return the
+            Chebyshev-forecasted output without touching the model.
+            """
+            fc = state.get_forecaster("_model")
+            t = state.t_norm()
+
+            if state.is_full:
+                # ---- Full compute: run model, cache output ----
+                out = apply_model(
+                    params["input"],
+                    params["timestep"],
+                    **params["c"]
+                )
+                fc.push(t, out)
+            else:
+                # ---- Skip: forecast output ----
+                predicted = fc.forecast(t)
+                if predicted is not None:
+                    out = predicted
+                else:
+                    # Fallback: not enough cache yet
+                    out = apply_model(
+                        params["input"],
+                        params["timestep"],
+                        **params["c"]
+                    )
+                    fc.push(t, out)
+
+            state.advance()
+            return out
+
+        m.set_model_unet_function_wrapper(spectrum_wrapper)
+        return (m,)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  2.  BLOCK-LEVEL  – per-model hooks for finer-grained caching
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SpectrumBlockAcceleration:
+    """
+    Block-level Spectrum: caches and forecasts individual transformer
+    block outputs.  More VRAM than model-output mode but can achieve
+    higher quality at the same compression ratio.
+
+    Requires model-specific hooks; currently supports Flux and Wan.
+    """
+
+    SUPPORTED = ["flux", "wan"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "model_type": (cls.SUPPORTED, {
+                    "tooltip": "Architecture of the loaded model."
+                }),
+                "num_steps": ("INT", {
+                    "default": 50, "min": 4, "max": 1000, "step": 1,
+                }),
+                "window_size": ("INT", {
+                    "default": 2, "min": 1, "max": 20, "step": 1,
+                }),
+                "flex_window": ("FLOAT", {
+                    "default": 0.75, "min": 0.1, "max": 1.0, "step": 0.05,
+                }),
+                "first_enhance": ("INT", {
+                    "default": 4, "min": 1, "max": 50, "step": 1,
+                }),
+                "chebyshev_bases": ("INT", {
+                    "default": 4, "min": 2, "max": 10, "step": 1,
+                }),
+                "regularization": ("FLOAT", {
+                    "default": 0.1, "min": 0.001, "max": 10.0, "step": 0.01,
+                }),
+                "spectral_weight": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "model_patches/acceleration"
+    DESCRIPTION = (
+        "Block-level Spectrum acceleration. Caches individual transformer "
+        "block outputs for higher-quality predictions. Model-specific: "
+        "currently supports Flux and Wan architectures."
+    )
+
+    def apply(self, model, model_type, num_steps, window_size, flex_window,
+              first_enhance, chebyshev_bases, regularization,
+              spectral_weight):
+
+        m = model.clone()
+
+        state = SpectrumState(
+            num_steps=num_steps,
+            m=chebyshev_bases,
+            lam=regularization,
+            w=spectral_weight,
+            window_size=window_size,
+            flex_window=flex_window,
+            first_enhance=first_enhance,
+        )
+
+        log_spec.info(
+            f"Spectrum (block-level, {model_type}): {num_steps} steps, "
+            f"{state.sched.compression:.2f}× compression"
+        )
+
+        # Apply model-specific block hooks
+        if model_type == "flux":
+            from .flux_hook import apply_spectrum_flux
+            apply_spectrum_flux(m, state)
+        elif model_type == "wan":
+            from .wan_hook import apply_spectrum_wan
+            apply_spectrum_wan(m, state)
+
+        # Still need a wrapper to track the step counter
+        def step_counter_wrapper(apply_model, params):
+            out = apply_model(
+                params["input"],
+                params["timestep"],
+                **params["c"]
+            )
+            state.advance()
+            return out
+
+        m.set_model_unet_function_wrapper(step_counter_wrapper)
+        return (m,)
+
+
 # Node class mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "EMAGGuider": EMAGGuider,
+    "EMASyncGuider": EMASyncGuider,
     # "LTXDualPromptEncoder": LTXDualPromptEncoder,
     # "LTXDualPromptEncoderAdvanced": LTXDualPromptEncoderAdvanced,
     "LTX2ScheduledEnhanceVideo": LTX2ScheduledEnhanceVideo,
@@ -2500,10 +3378,13 @@ NODE_CLASS_MAPPINGS = {
     "FocusDeconvBlind": FocusDeconvBlind,
     "FocusDeconvPSFPreview": FocusDeconvPSFPreview,
     "FocusDeconvAdvanced": FocusDeconvAdvanced,
+    "SpectrumAcceleration": SpectrumAcceleration,
+    "SpectrumBlockAcceleration": SpectrumBlockAcceleration,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "EMAGGuider": "EMAG Guider",
+    "EMASyncGuider": "EMAG + SyncCFG Hybrid Guider",
     # "LTXDualPromptEncoder": "LTX Dual Prompt Encoder",
     # "LTXDualPromptEncoderAdvanced": "LTX Dual Prompt Encoder (Advanced)",
     "LTX2ScheduledEnhanceVideo": "LTX-2 Scheduled Enhance-A-Video",
@@ -2518,4 +3399,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FocusDeconvBlind": "🔍 Focus Deconv - Blind (Auto)",
     "FocusDeconvPSFPreview": "🔍 Focus Deconv - PSF Preview",
     "FocusDeconvAdvanced": "🔍 Focus Deconv - Advanced",
+    "SpectrumAcceleration": "Spectrum Acceleration",
+    "SpectrumBlockAcceleration": "Spectrum Block Acceleration",
 }
