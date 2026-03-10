@@ -2416,6 +2416,356 @@ class LTXRoPEAxisBalance:
 # Node: LTX RoPE Axis Balance — Simple
 # ---------------------------------------------------------------------------
 
+"""
+RoPE Axis Balance for ComfyUI - LTX-Video / LTX-2 (LTXAV)
+==============================================================================
+Patches the 3D Rotary Position Embedding to equalise angular discrimination
+between the height (H) and width (W) spatial axes.
+
+PROBLEM
+-------
+LTX uses max_pos = [20, 2048, 2048] to normalise positional coordinates
+into fractional values before computing RoPE frequencies.  At 16:9, the
+latent grid only covers ~52% of the H range vs ~92% of the W range,
+giving the model 1.84x more positional discrimination for horizontal
+displacement than vertical.  This causes "squiggle" artifacts on vertical
+camera pans while horizontal pans are clean.
+
+FIX
+---
+Adjusts max_pos[H] so both axes cover the same fractional range.
+Zero computational cost - same operations, different constants.
+
+COMPATIBILITY
+-------------
+Works with:
+  - Old ComfyUI (LTXVModel with precompute_freqs_cis)
+  - New ComfyUI (LTXAV with generate_freq_grid_np / generate_freq_grid_pytorch)
+  - Any version: falls back to model attribute patching
+
+CONNECTION
+----------
+    Model Loader -> [RoPE Axis Balance] -> CFGZeroStar -> EAV -> APG -> ...
+==============================================================================
+"""
+
+import torch
+import math
+import logging
+
+logger = logging.getLogger("ComfyUI-RoPEBalance")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _compute_equalized_max_pos(h_latent, w_latent, ref_max_pos_w, max_pos_t,
+                                vertical_boost=1.0):
+    """Return [t, h, w] max_pos with H equalised to match W's angular span."""
+    if w_latent <= 1 or h_latent <= 1:
+        return [max_pos_t, ref_max_pos_w, ref_max_pos_w]
+
+    equalized_h = ref_max_pos_w * (h_latent - 1) / (w_latent - 1)
+
+    if vertical_boost > 0:
+        adjusted_h = equalized_h / vertical_boost
+    else:
+        adjusted_h = equalized_h
+
+    adjusted_h = max(1, int(round(adjusted_h)))
+    return [max_pos_t, adjusted_h, ref_max_pos_w]
+
+
+def _angular_span(latent_dim, max_pos, scale=32):
+    """Fractional angular span for one axis (diagnostic helper)."""
+    if max_pos <= 0 or latent_dim <= 1:
+        return 0.0
+    frac = ((latent_dim - 1) * scale) / max_pos
+    return 2.0 * frac
+
+
+def _find_freq_functions():
+    """Discover the RoPE frequency function(s) in current ComfyUI.
+
+    Returns dict with keys 'module' and 'functions' (list of function names),
+    or None if nothing found.
+    """
+    try:
+        import comfy.ldm.lightricks.model as ltx_mod
+
+        found = {
+            'module': ltx_mod,
+            'functions': [],
+        }
+
+        # New LTXAV path: generate_freq_grid_np / generate_freq_grid_pytorch
+        for name in ['generate_freq_grid_np', 'generate_freq_grid_pytorch']:
+            if hasattr(ltx_mod, name):
+                found['functions'].append(name)
+
+        # Old path: precompute_freqs_cis
+        if hasattr(ltx_mod, 'precompute_freqs_cis'):
+            found['functions'].append('precompute_freqs_cis')
+
+        if found['functions']:
+            return found
+
+    except ImportError:
+        pass
+
+    return None
+
+
+def _find_max_pos_attr(diffusion_model):
+    """Find the positional_embedding_max_pos attribute on the model.
+
+    Different ComfyUI versions store it in different places:
+    - model.positional_embedding_max_pos  (direct)
+    - model.positional_embedding_max_pos_count  (some versions)
+    """
+    candidates = [
+        'positional_embedding_max_pos',
+        'positional_embedding_max_pos_count',
+    ]
+    for attr in candidates:
+        if hasattr(diffusion_model, attr):
+            return attr
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Node: LTX RoPE Axis Balance
+# ---------------------------------------------------------------------------
+
+class LTXRoPEAxisBalance:
+    """
+    Equalise or manually control the 3D RoPE positional embedding ranges
+    for LTX-Video / LTX-2 (LTXAV) models.
+
+    Fixes directional asymmetry where horizontal camera motion is stable
+    but vertical pans produce noise/artifacts.
+
+    Zero computational cost - same operations, different normalisation.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "mode": (["auto_equalize", "manual"], {
+                    "default": "auto_equalize",
+                    "tooltip": (
+                        "auto_equalize: compute max_pos_h from the actual "
+                        "latent aspect ratio each step so H and W get equal "
+                        "angular discrimination.  manual: use the explicit "
+                        "max_pos values below."
+                    ),
+                }),
+                "vertical_boost": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.1,
+                    "max": 5.0,
+                    "step": 0.05,
+                    "tooltip": (
+                        "Multiplier on vertical-axis discrimination.  "
+                        "1.0 = equalised with horizontal.  "
+                        ">1.0 = vertical gets MORE discrimination (try 1.2-1.5 "
+                        "if squiggles persist).  "
+                        "<1.0 = vertical gets less (closer to default bias)."
+                    ),
+                }),
+            },
+            "optional": {
+                "max_pos_t": ("INT", {
+                    "default": 20,
+                    "min": 1,
+                    "max": 1000,
+                    "step": 1,
+                    "tooltip": "Temporal axis max position (default 20). Used in both modes.",
+                }),
+                "max_pos_h": ("INT", {
+                    "default": 2048,
+                    "min": 1,
+                    "max": 16384,
+                    "step": 1,
+                    "tooltip": "Manual mode only: height axis max position.",
+                }),
+                "max_pos_w": ("INT", {
+                    "default": 2048,
+                    "min": 1,
+                    "max": 16384,
+                    "step": 1,
+                    "tooltip": (
+                        "Width axis max position (default 2048).  "
+                        "In auto mode this is the reference value for "
+                        "computing the equalised height."
+                    ),
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+    CATEGORY = "model_patches/guidance"
+    TITLE = "LTX RoPE Axis Balance"
+
+    def patch(self, model, mode, vertical_boost,
+              max_pos_t=20, max_pos_h=2048, max_pos_w=2048):
+
+        m = model.clone()
+
+        # ----- Discover patching strategy at node connect time -------------
+        freq_info = _find_freq_functions()
+        if freq_info is not None:
+            logger.info(
+                f"[RoPE Axis Balance] Found frequency functions: "
+                f"{freq_info['functions']} in {freq_info['module'].__name__}"
+            )
+        else:
+            logger.info(
+                "[RoPE Axis Balance] No module-level freq functions found - "
+                "will patch model attribute directly at runtime."
+            )
+
+        # ----- Close over node settings ------------------------------------
+        _mode = mode
+        _vboost = vertical_boost
+        _mpt = max_pos_t
+        _mph = max_pos_h
+        _mpw = max_pos_w
+        _freq_info = freq_info
+        _last_logged = [None]
+
+        def rope_balance_wrapper(apply_model, args):
+            # --- Determine custom max_pos from latent shape ----------------
+            x = args.get("input")
+            if x is not None and x.dim() == 5:
+                h_lat = x.shape[3]
+                w_lat = x.shape[4]
+            else:
+                h_lat = None
+                w_lat = None
+
+            if _mode == "auto_equalize" and h_lat is not None and w_lat is not None:
+                custom_max_pos = _compute_equalized_max_pos(
+                    h_lat, w_lat, _mpw, _mpt, _vboost
+                )
+            elif _mode == "manual":
+                adjusted_h = max(1, int(round(_mph / _vboost)))
+                custom_max_pos = [_mpt, adjusted_h, _mpw]
+            else:
+                custom_max_pos = [_mpt, _mph, _mpw]
+
+            # --- Log once per unique configuration -------------------------
+            log_key = tuple(custom_max_pos)
+            if log_key != tuple(_last_logged[0] or []):
+                _last_logged[0] = list(custom_max_pos)
+                if h_lat is not None and w_lat is not None:
+                    span_h = _angular_span(h_lat, custom_max_pos[1])
+                    span_w = _angular_span(w_lat, custom_max_pos[2])
+                    default_span_h = _angular_span(h_lat, 2048)
+                    default_span_w = _angular_span(w_lat, 2048)
+                    msg = (
+                        f"[RoPE Axis Balance] mode={_mode} boost={_vboost:.2f}  "
+                        f"latent={w_lat}x{h_lat}  "
+                        f"max_pos=[{custom_max_pos[0]}, {custom_max_pos[1]}, {custom_max_pos[2]}]  "
+                        f"span H={span_h:.3f} W={span_w:.3f}  "
+                        f"(default: H={default_span_h:.3f} W={default_span_w:.3f})"
+                    )
+                    logger.info(msg)
+                    print(msg)
+
+            # === STRATEGY 1: Patch module-level frequency functions =========
+            originals = {}
+            ltx_mod = None
+
+            if _freq_info is not None:
+                ltx_mod = _freq_info['module']
+
+                for func_name in _freq_info['functions']:
+                    original_func = getattr(ltx_mod, func_name)
+                    originals[func_name] = original_func
+
+                    def make_wrapper(orig_fn, fn_name):
+                        def wrapper(*args, **kwargs):
+                            if fn_name == 'precompute_freqs_cis':
+                                # Old signature: (indices_grid, dim, out_dtype,
+                                #                 theta=10000.0, max_pos=[20,2048,2048])
+                                kwargs['max_pos'] = custom_max_pos
+                                return orig_fn(*args, **kwargs)
+                            else:
+                                # New signature: generate_freq_grid_np / _pytorch
+                                # (theta, max_pos_count, dim, device_or_None)
+                                # max_pos_count is arg[1]
+                                new_args = list(args)
+                                if len(new_args) >= 2:
+                                    new_args[1] = custom_max_pos
+                                # Also handle keyword form
+                                for key in ['positional_embedding_max_pos_count',
+                                            'max_pos_count', 'max_pos']:
+                                    if key in kwargs:
+                                        kwargs[key] = custom_max_pos
+                                return orig_fn(*new_args, **kwargs)
+                        return wrapper
+
+                    setattr(ltx_mod, func_name, make_wrapper(original_func, func_name))
+
+            # === STRATEGY 2: Patch model attribute directly =================
+            attr_patches = {}
+            diff_model = None
+
+            try:
+                if hasattr(apply_model, '__self__'):
+                    model_obj = apply_model.__self__
+                    for path in ['diffusion_model', 'model', 'inner_model']:
+                        if hasattr(model_obj, path):
+                            diff_model = getattr(model_obj, path)
+                            break
+
+                if diff_model is not None:
+                    attr_name = _find_max_pos_attr(diff_model)
+                    if attr_name is not None:
+                        attr_patches[attr_name] = getattr(diff_model, attr_name)
+                        setattr(diff_model, attr_name, custom_max_pos)
+                    else:
+                        for sub_attr in ['video_model', 'video_stream']:
+                            if hasattr(diff_model, sub_attr):
+                                sub = getattr(diff_model, sub_attr)
+                                sub_name = _find_max_pos_attr(sub)
+                                if sub_name is not None:
+                                    attr_patches[(sub_attr, sub_name)] = getattr(sub, sub_name)
+                                    setattr(sub, sub_name, custom_max_pos)
+                                    break
+            except Exception as e:
+                logger.debug(f"[RoPE Axis Balance] Attribute patch failed: {e}")
+
+            # === Execute the actual model forward pass =====================
+            try:
+                return apply_model(args["input"], args["timestep"], **args["c"])
+            finally:
+                # Always restore everything
+                if ltx_mod is not None:
+                    for func_name, orig_fn in originals.items():
+                        setattr(ltx_mod, func_name, orig_fn)
+
+                if diff_model is not None:
+                    for key, orig_val in attr_patches.items():
+                        if isinstance(key, tuple):
+                            sub = getattr(diff_model, key[0])
+                            setattr(sub, key[1], orig_val)
+                        else:
+                            setattr(diff_model, key, orig_val)
+
+        m.set_model_unet_function_wrapper(rope_balance_wrapper)
+        return (m,)
+
+
+# ---------------------------------------------------------------------------
+# Node: LTX RoPE Axis Balance - Simple
+# ---------------------------------------------------------------------------
+
 class LTXRoPEAxisBalanceSimple:
     """
     Simplified one-knob version.
@@ -2449,7 +2799,6 @@ class LTXRoPEAxisBalanceSimple:
     TITLE = "LTX RoPE Axis Balance (Simple)"
 
     def patch(self, model, vertical_boost):
-        # Delegate to the full node with auto mode
         full_node = LTXRoPEAxisBalance()
         return full_node.patch(
             model,
@@ -2467,11 +2816,10 @@ class LTXRoPEAxisBalanceSimple:
 
 class LTXRoPEDiagnostic:
     """
-    Diagnostic node — does NOT modify the model.
+    Diagnostic node - does NOT modify the model.
 
     Computes and displays the effective RoPE angular spans for a given
     resolution so you can see the asymmetry before/after patching.
-    Connect to any MODEL output; prints info to console.
     """
 
     @classmethod
@@ -2481,19 +2829,15 @@ class LTXRoPEDiagnostic:
                 "model": ("MODEL",),
                 "width": ("INT", {
                     "default": 1920, "min": 64, "max": 8192, "step": 32,
-                    "tooltip": "Output pixel width"
                 }),
                 "height": ("INT", {
                     "default": 1080, "min": 64, "max": 8192, "step": 32,
-                    "tooltip": "Output pixel height"
                 }),
                 "max_pos_h": ("INT", {
                     "default": 2048, "min": 1, "max": 16384,
-                    "tooltip": "Current or proposed max_pos for height axis"
                 }),
                 "max_pos_w": ("INT", {
                     "default": 2048, "min": 1, "max": 16384,
-                    "tooltip": "Current or proposed max_pos for width axis"
                 }),
             },
         }
@@ -2506,50 +2850,56 @@ class LTXRoPEDiagnostic:
     OUTPUT_NODE = True
 
     def diagnose(self, model, width, height, max_pos_h, max_pos_w):
-        # LTX VAE: 32× spatial downscale
         w_lat = width // 32
         h_lat = height // 32
 
-        # With default max_pos
         default_span_h = _angular_span(h_lat, 2048)
         default_span_w = _angular_span(w_lat, 2048)
         default_ratio = default_span_w / default_span_h if default_span_h > 0 else float('inf')
 
-        # With proposed max_pos
         proposed_span_h = _angular_span(h_lat, max_pos_h)
         proposed_span_w = _angular_span(w_lat, max_pos_w)
         proposed_ratio = proposed_span_w / proposed_span_h if proposed_span_h > 0 else float('inf')
 
-        # Auto-equalized
-        eq_max_pos = _compute_equalized_max_pos(h_lat, w_lat, 2048, 20, 1.0)
-        eq_span_h = _angular_span(h_lat, eq_max_pos[1])
-        eq_span_w = _angular_span(w_lat, eq_max_pos[2])
+        eq = _compute_equalized_max_pos(h_lat, w_lat, 2048, 20, 1.0)
+        eq_span_h = _angular_span(h_lat, eq[1])
+        eq_span_w = _angular_span(w_lat, eq[2])
+
+        freq_info = _find_freq_functions()
+        freq_report = (
+            f"Detected: {freq_info['functions']}"
+            if freq_info else "No freq functions found (will use attribute patching)"
+        )
 
         lines = [
-            f"═══ RoPE Axis Diagnostic for {width}×{height} ═══",
-            f"Latent dimensions: {w_lat}×{h_lat} (W×H)",
+            f"=== RoPE Axis Diagnostic for {width}x{height} ===",
+            f"Latent dimensions: {w_lat}x{h_lat} (WxH)",
+            f"ComfyUI backend: {freq_report}",
             f"",
-            f"── DEFAULT max_pos=[20, 2048, 2048] ──",
+            f"-- DEFAULT max_pos=[20, 2048, 2048] --",
             f"  H angular span: {default_span_h:.4f}",
             f"  W angular span: {default_span_w:.4f}",
-            f"  W/H ratio:      {default_ratio:.3f}×  ← W has {default_ratio:.1f}× more discrimination",
+            f"  W/H ratio:      {default_ratio:.3f}x",
             f"",
-            f"── PROPOSED max_pos=[20, {max_pos_h}, {max_pos_w}] ──",
+            f"-- PROPOSED max_pos=[20, {max_pos_h}, {max_pos_w}] --",
             f"  H angular span: {proposed_span_h:.4f}",
             f"  W angular span: {proposed_span_w:.4f}",
-            f"  W/H ratio:      {proposed_ratio:.3f}×",
+            f"  W/H ratio:      {proposed_ratio:.3f}x",
             f"",
-            f"── AUTO EQUALIZED max_pos=[20, {eq_max_pos[1]}, {eq_max_pos[2]}] ──",
+            f"-- AUTO EQUALIZED max_pos=[20, {eq[1]}, {eq[2]}] --",
             f"  H angular span: {eq_span_h:.4f}",
             f"  W angular span: {eq_span_w:.4f}",
-            f"  Equalized ratio: {eq_span_w / eq_span_h if eq_span_h > 0 else 0:.3f}×",
+            f"  Ratio:          {eq_span_w / eq_span_h if eq_span_h > 0 else 0:.3f}x",
         ]
         report = "\n".join(lines)
-
         print(report)
-        ropebal_logger.info(report)
-
+        logger.info(report)
         return (model, report,)
+    
+
+# ---------------------------------------------------------------------------
+# Blind Deconvolution
+# ---------------------------------------------------------------------------
     
 
 """
@@ -3358,6 +3708,631 @@ class SpectrumBlockAcceleration:
 
         m.set_model_unet_function_wrapper(step_counter_wrapper)
         return (m,)
+    
+
+"""
+ComfyUI-LTXV-ALG
+Adaptive Low-Pass Guidance for LTX-2 Image-to-Video conditioning.
+
+Based on "Improving Motion in Image-to-Video Models via Adaptive
+Low-Pass Guidance" (Choi et al., CVPR 2026)
+
+Implements per-frame ALG filtering with chainable multi-frame support,
+negative frame indexing, and per-step re-injection via model patching.
+
+Three nodes:
+  1. LTXVImgToVideoInplaceALG  — encode + filter + inject + chain
+  2. LTXVALGModelPatch          — patch model for per-step re-injection
+  3. LTXVALGPostOverride        — post-sampling clean latent replacement
+"""
+
+# ════════════════════════════════════════════════════════════════
+#  Low-pass filter utilities
+# ════════════════════════════════════════════════════════════════
+
+def bilinear_down_up(latent_2d: torch.Tensor,
+                     resize_factor: float) -> torch.Tensor:
+    """
+    Low-pass via bilinear downsample → upsample.
+    Input: [B, C, H, W]   Output: same shape, high-freq removed.
+    """
+    orig_h, orig_w = latent_2d.shape[-2], latent_2d.shape[-1]
+    small_h = max(1, round(orig_h * resize_factor))
+    small_w = max(1, round(orig_w * resize_factor))
+    down = F.interpolate(latent_2d, size=(small_h, small_w),
+                         mode="bilinear", align_corners=False)
+    up = F.interpolate(down, size=(orig_h, orig_w),
+                       mode="bilinear", align_corners=False)
+    return up
+
+
+def gaussian_blur_2d(latent_2d: torch.Tensor,
+                     sigma: float,
+                     kernel_size: int = 0) -> torch.Tensor:
+    """
+    Low-pass via separable Gaussian blur.
+    Input: [B, C, H, W]   Output: same shape.
+    """
+    if sigma <= 0:
+        return latent_2d
+    if kernel_size <= 0:
+        kernel_size = int(math.ceil(sigma * 6)) | 1
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+
+    x = torch.arange(kernel_size, dtype=latent_2d.dtype,
+                     device=latent_2d.device) - kernel_size // 2
+    kernel_1d = torch.exp(-x ** 2 / (2 * sigma ** 2))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+
+    C = latent_2d.shape[1]
+    kh = kernel_1d.view(1, 1, -1, 1).expand(C, 1, -1, 1)
+    kw = kernel_1d.view(1, 1, 1, -1).expand(C, 1, -1, 1)
+    pad_h = kernel_size // 2
+    pad_w = kernel_size // 2
+
+    out = F.pad(latent_2d, (0, 0, pad_h, pad_h), mode="reflect")
+    out = F.conv2d(out, kh, groups=C)
+    out = F.pad(out, (pad_w, pad_w, 0, 0), mode="reflect")
+    out = F.conv2d(out, kw, groups=C)
+    return out
+
+
+def apply_lowpass_filter(latent_2d: torch.Tensor,
+                         filter_type: str = "down_up",
+                         resize_factor: float = 0.25,
+                         blur_sigma: float = 2.0,
+                         blur_kernel_size: int = 0,
+                         strength: float = 1.0) -> torch.Tensor:
+    """
+    Apply low-pass filter with strength blending.
+    strength=1.0 → fully filtered,  strength=0.0 → original.
+    Handles intermediate strengths via effective-parameter scaling.
+    """
+    if strength <= 0.0:
+        return latent_2d.clone()
+
+    if filter_type == "down_up":
+        # Scale resize_factor: at strength=1.0 use resize_factor,
+        # at strength→0 use 1.0 (no downsampling).
+        eff = 1.0 - strength * (1.0 - resize_factor)
+        filtered = bilinear_down_up(latent_2d, eff)
+    elif filter_type == "gaussian_blur":
+        eff_sigma = blur_sigma * strength
+        filtered = gaussian_blur_2d(latent_2d, eff_sigma, blur_kernel_size)
+    else:
+        return latent_2d.clone()
+
+    if strength >= 1.0:
+        return filtered
+    # Lerp for sub-1.0 strengths with smooth schedules
+    return latent_2d * (1.0 - strength) + filtered * strength
+
+
+# ════════════════════════════════════════════════════════════════
+#  ALG schedule functions
+# ════════════════════════════════════════════════════════════════
+
+def compute_alg_strength(progress: float,
+                         schedule_type: str,
+                         schedule_end: float = 0.06,
+                         exp_decay_rate: float = 30.0) -> float:
+    """
+    Return filter strength in [0, 1] given denoising progress in [0, 1].
+    progress=0 is first step, progress=1 is fully denoised.
+
+    Schedules:
+      interval     — full strength until schedule_end, then off
+      linear       — linear decay from 1→0 over [0, schedule_end]
+      exponential  — exp(-decay_rate * progress)
+      cosine       — cosine half-period decay over [0, schedule_end]
+      constant     — always 1.0 (diagnostic / ablation only)
+    """
+    if schedule_type == "interval":
+        return 1.0 if progress < schedule_end else 0.0
+
+    elif schedule_type == "linear":
+        if progress >= schedule_end:
+            return 0.0
+        return 1.0 - (progress / max(schedule_end, 1e-8))
+
+    elif schedule_type == "exponential":
+        return math.exp(-exp_decay_rate * progress)
+
+    elif schedule_type == "cosine":
+        if progress >= schedule_end:
+            return 0.0
+        t = progress / max(schedule_end, 1e-8)
+        return 0.5 * (1.0 + math.cos(math.pi * t))
+
+    else:  # "constant"
+        return 1.0
+
+
+# ════════════════════════════════════════════════════════════════
+#  ALG frame configuration (passed between nodes)
+# ════════════════════════════════════════════════════════════════
+
+class ALGFrameConfig:
+    """
+    Holds both clean and filtered latent versions for a single
+    conditioning frame, plus its ALG schedule parameters.
+    """
+    __slots__ = (
+        "frame_idx", "clean_latent", "filtered_latent",
+        "cond_noise", "cond_timestep",
+        "schedule_type", "schedule_end", "exp_decay_rate",
+        "filter_type", "resize_factor",
+        "blur_sigma", "blur_kernel_size",
+    )
+
+    def __init__(self, **kwargs):
+        for k in self.__slots__:
+            setattr(self, k, kwargs.get(k))
+
+    def get_injection_latent(self, progress: float) -> torch.Tensor:
+        """
+        Return the noised conditioning latent appropriate for the
+        current denoising progress.  Handles schedule-dependent
+        blending between filtered and clean versions.
+
+        Returns: [B, C, 1, H, W] tensor noised to cond_timestep.
+        """
+        strength = compute_alg_strength(
+            progress,
+            self.schedule_type,
+            self.schedule_end,
+            self.exp_decay_rate,
+        )
+
+        if strength <= 0.0:
+            base = self.clean_latent
+        elif strength >= 1.0:
+            base = self.filtered_latent
+        else:
+            # Re-filter at current strength for smooth schedules
+            spatial = self.clean_latent.squeeze(2)  # [B,C,H,W]
+            filtered_spatial = apply_lowpass_filter(
+                spatial,
+                filter_type=self.filter_type,
+                resize_factor=self.resize_factor,
+                blur_sigma=self.blur_sigma,
+                blur_kernel_size=self.blur_kernel_size,
+                strength=strength,
+            )
+            base = filtered_spatial.unsqueeze(2)  # [B,C,1,H,W]
+
+        # Noise to conditioning level
+        # Flow matching: x_t = (1-t)*x_0 + t*eps
+        t = self.cond_timestep
+        return (1.0 - t) * base + t * self.cond_noise
+
+
+# ════════════════════════════════════════════════════════════════
+#  ALG denoising-step tracker
+# ════════════════════════════════════════════════════════════════
+
+class ALGStepTracker:
+    """
+    Determines denoising progress from sigma values observed
+    during model forward passes.  Robust to:
+      - CFG (2+ forward passes per step at the same sigma)
+      - Batched CFG (single pass with doubled batch)
+      - Multi-stage pipelines (sigma may reset between stages)
+    """
+
+    def __init__(self, total_steps: int):
+        self.total_steps = max(total_steps, 1)
+        self._prev_sigma: Optional[float] = None
+        self._step: int = -1
+
+    def reset(self):
+        self._prev_sigma = None
+        self._step = -1
+
+    def observe_sigma(self, sigma_val: float) -> float:
+        """
+        Call once per model forward pass with the current sigma.
+        Returns denoising progress in [0, 1].
+        """
+        EPS = 1e-6
+        if self._prev_sigma is None:
+            # Very first call
+            self._step = 0
+            self._prev_sigma = sigma_val
+        elif abs(sigma_val - self._prev_sigma) > EPS:
+            if sigma_val < self._prev_sigma:
+                # Sigma decreased → new denoising step
+                self._step += 1
+            else:
+                # Sigma increased → likely a new sampling stage / reset
+                self._step = 0
+            self._prev_sigma = sigma_val
+        # else: same sigma → CFG pass, don't increment
+
+        return min(self._step / self.total_steps, 1.0)
+
+
+# ════════════════════════════════════════════════════════════════
+#  NODE 1:  LTXVImgToVideoInplaceALG
+# ════════════════════════════════════════════════════════════════
+
+class LTXVImgToVideoInplaceALG:
+    """
+    Drop-in replacement / enhancement for LTXVImgToVideoInplace.
+
+    Encodes the conditioning image via VAE, creates both a clean
+    and ALG-filtered latent version, injects the filtered version
+    into the noise tensor, and outputs chainable ALG_FRAMES data
+    for use with LTXVALGModelPatch.
+
+    Supports negative frame_idx (-1 = last frame, -2 = penultimate, etc.)
+    Chain multiple instances for first/middle/last frame conditioning.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "image": ("IMAGE",),
+                "vae": ("VAE",),
+                "frame_idx": ("INT", {
+                    "default": 0, "min": -256, "max": 256, "step": 1,
+                    "tooltip": (
+                        "Latent temporal index for injection. "
+                        "0 = first frame.  -1 = last frame. "
+                        "-2 = second-to-last, etc."
+                    ),
+                }),
+                "cond_timestep": ("FLOAT", {
+                    "default": 0.001, "min": 0.0, "max": 0.1, "step": 0.001,
+                    "tooltip": (
+                        "Noise level for the conditioning frame. "
+                        "Lower = cleaner conditioning. "
+                        "0.001 is the LTX-Video default."
+                    ),
+                }),
+                "filter_type": (["down_up", "gaussian_blur"], {
+                    "default": "down_up",
+                }),
+                "resize_factor": ("FLOAT", {
+                    "default": 0.25, "min": 0.05, "max": 0.95, "step": 0.05,
+                    "tooltip": (
+                        "For down_up: fraction to downsample to. "
+                        "0.25 = quarter res (recommended). "
+                        "Smaller = stronger filtering = more motion."
+                    ),
+                }),
+                "schedule_type": (
+                    ["interval", "linear", "exponential", "cosine", "constant"],
+                    {"default": "interval"},
+                ),
+                "schedule_end": ("FLOAT", {
+                    "default": 0.06, "min": 0.01, "max": 0.5, "step": 0.01,
+                    "tooltip": (
+                        "For interval/linear/cosine: fraction of total "
+                        "steps to apply filtering.  0.06 = first 6%% "
+                        "(~2 steps at 25 total, ~3 steps at 50 total)."
+                    ),
+                }),
+                "enabled": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "alg_frames_in": ("ALG_FRAMES",),
+                "blur_sigma": ("FLOAT", {
+                    "default": 2.0, "min": 0.1, "max": 20.0, "step": 0.1,
+                }),
+                "exp_decay_rate": ("FLOAT", {
+                    "default": 30.0, "min": 1.0, "max": 100.0, "step": 1.0,
+                }),
+                "blur_kernel_size": ("INT", {
+                    "default": 0, "min": 0, "max": 99, "step": 2,
+                    "tooltip": "0 = auto from sigma.  Must be odd if set.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT", "ALG_FRAMES")
+    RETURN_NAMES = ("latent", "alg_frames")
+    FUNCTION = "apply"
+    CATEGORY = "LTXVideo/ALG"
+
+    def apply(self, latent, image, vae, frame_idx, cond_timestep,
+              filter_type, resize_factor, schedule_type, schedule_end,
+              enabled, alg_frames_in=None, blur_sigma=2.0,
+              exp_decay_rate=30.0, blur_kernel_size=0):
+
+        # ── Clone the latent so we don't mutate upstream ──
+        out_latent = copy.deepcopy(latent)
+        samples = out_latent["samples"]  # [B, C, T, H, W]
+        T = samples.shape[2]
+
+        # ── Resolve frame index (negative → from end) ──
+        if frame_idx < 0:
+            actual_idx = T + frame_idx
+        else:
+            actual_idx = frame_idx
+
+        if actual_idx < 0 or actual_idx >= T:
+            raise ValueError(
+                f"frame_idx={frame_idx} resolves to latent index "
+                f"{actual_idx}, but temporal dim is {T}. "
+                f"Valid range: [0, {T-1}] or [{-T}, -1]."
+            )
+
+        # ── Collect existing ALG frames ──
+        frames: List[ALGFrameConfig] = []
+        if alg_frames_in is not None:
+            frames = list(alg_frames_in)
+
+        if not enabled:
+            # Pass through: still inject clean image normally
+            # but don't create ALG config
+            pass
+
+        # ── VAE-encode the conditioning image ──
+        # ComfyUI IMAGE format: [B, H, W, C] float32 in [0, 1]
+        pixels = image[:1, :, :, :3]  # Take first image, RGB only
+
+        # VAE.encode expects [B, H, W, C] in ComfyUI convention
+        encoded = vae.encode(pixels)  # Returns [B, C, h, w]
+
+        if encoded.dim() == 4:
+            encoded = encoded.unsqueeze(2)  # → [B, C, 1, h, w]
+
+        # Match spatial dimensions to the noise latent
+        lat_h, lat_w = samples.shape[-2], samples.shape[-1]
+        enc_h, enc_w = encoded.shape[-2], encoded.shape[-1]
+        if enc_h != lat_h or enc_w != lat_w:
+            enc_flat = encoded.squeeze(2)
+            enc_flat = F.interpolate(
+                enc_flat, size=(lat_h, lat_w),
+                mode="bilinear", align_corners=False
+            )
+            encoded = enc_flat.unsqueeze(2)
+
+        # Move to same device/dtype as noise latent
+        clean_latent = encoded.to(
+            device=samples.device, dtype=samples.dtype
+        )
+
+        # ── Create filtered latent ──
+        clean_spatial = clean_latent.squeeze(2)  # [B, C, H, W]
+        filtered_spatial = apply_lowpass_filter(
+            clean_spatial,
+            filter_type=filter_type,
+            resize_factor=resize_factor,
+            blur_sigma=blur_sigma,
+            blur_kernel_size=blur_kernel_size,
+            strength=1.0,
+        )
+        filtered_latent = filtered_spatial.unsqueeze(2)  # [B,C,1,H,W]
+
+        # ── Generate deterministic noise for conditioning ──
+        # Use frame_idx-based seed for reproducibility across re-runs
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(42 + actual_idx)
+        cond_noise = torch.randn(
+            clean_latent.shape, generator=gen, dtype=clean_latent.dtype
+        ).to(device=clean_latent.device)
+
+        # ── Inject into the noise tensor ──
+        t = cond_timestep
+        if enabled:
+            # ALG mode: inject filtered version initially
+            noised = (1.0 - t) * filtered_latent + t * cond_noise
+        else:
+            # Bypass: inject clean version (standard I2V behavior)
+            noised = (1.0 - t) * clean_latent + t * cond_noise
+
+        # Handle batch dim mismatch (noise latent may have B>1)
+        B_lat = samples.shape[0]
+        B_enc = noised.shape[0]
+        if B_lat > B_enc:
+            noised = noised.repeat(B_lat, 1, 1, 1, 1)
+
+        samples[:, :, actual_idx:actual_idx + 1] = noised[:B_lat]
+
+        # ── Update noise_mask for per-token timestep ──
+        # The noise_mask tells LTX's scheduler which frames are
+        # conditioned.  1.0 = full noise (denoise normally),
+        # near-0 = conditioning (low timestep).
+        # Merge with existing mask if present (for chaining).
+        if "noise_mask" in out_latent:
+            noise_mask = out_latent["noise_mask"].clone()
+        else:
+            noise_mask = torch.ones(
+                (1, 1, T, 1, 1),
+                device=samples.device, dtype=samples.dtype
+            )
+        noise_mask[:, :, actual_idx:actual_idx + 1] = cond_timestep
+        out_latent["noise_mask"] = noise_mask
+        out_latent["samples"] = samples
+
+        # ── Build ALG frame config ──
+        if enabled:
+            cfg = ALGFrameConfig(
+                frame_idx=actual_idx,
+                clean_latent=clean_latent.cpu(),
+                filtered_latent=filtered_latent.cpu(),
+                cond_noise=cond_noise.cpu(),
+                cond_timestep=cond_timestep,
+                schedule_type=schedule_type,
+                schedule_end=schedule_end,
+                exp_decay_rate=exp_decay_rate,
+                filter_type=filter_type,
+                resize_factor=resize_factor,
+                blur_sigma=blur_sigma,
+                blur_kernel_size=blur_kernel_size,
+            )
+            frames.append(cfg)
+
+        return (out_latent, frames)
+
+
+# ════════════════════════════════════════════════════════════════
+#  NODE 2:  LTXVALGModelPatch
+# ════════════════════════════════════════════════════════════════
+
+class LTXVALGModelPatch:
+    """
+    Patches the model's UNet forward pass to re-inject conditioning
+    latents at each denoising step, switching from ALG-filtered to
+    clean versions according to each frame's schedule.
+
+    Connect between your model loader and the guider / sampler.
+
+    The total_steps parameter MUST match your sampler's actual step
+    count (len(sigmas) - 1) for correct schedule timing.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "alg_frames": ("ALG_FRAMES",),
+                "total_steps": ("INT", {
+                    "default": 25, "min": 1, "max": 200, "step": 1,
+                    "tooltip": (
+                        "Must match your sampler step count. "
+                        "E.g. if using 8-step distilled, set to 8."
+                    ),
+                }),
+                "delay_steps": ("INT", {
+                    "default": 0, "min": 0, "max": 10, "step": 1,
+                    "tooltip": (
+                        "Run this many initial steps with the clean "
+                        "(unfiltered) latent before ALG kicks in. "
+                        "Paper recommends 0-2."
+                    ),
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+    CATEGORY = "LTXVideo/ALG"
+
+    def patch(self, model, alg_frames, total_steps, delay_steps):
+        m = model.clone()
+
+        tracker = ALGStepTracker(total_steps)
+        frames: List[ALGFrameConfig] = list(alg_frames)
+
+        _delay = delay_steps
+
+        def alg_unet_wrapper(apply_model_func, options):
+            input_x = options["input"]          # [B, C, T, H, W]
+            timestep = options["timestep"]
+            c = options["c"]
+
+            # ── Determine sigma and progress ──
+            if timestep.dim() == 0:
+                sigma_val = timestep.item()
+            elif timestep.numel() == 1:
+                sigma_val = timestep.item()
+            else:
+                # Per-token timesteps or batched — take the maximum
+                # (non-conditioning tokens have the denoising sigma)
+                sigma_val = timestep.max().item()
+
+            progress = tracker.observe_sigma(sigma_val)
+            current_step = tracker._step
+
+            # ── Re-inject conditioning latents ──
+            x = input_x.clone()
+            B = x.shape[0]
+
+            for fcfg in frames:
+                idx = fcfg.frame_idx
+                if idx >= x.shape[2]:
+                    continue  # Frame index OOB, skip silently
+
+                if current_step < _delay:
+                    # Delay phase: use clean conditioning
+                    t = fcfg.cond_timestep
+                    clean = fcfg.clean_latent.to(
+                        device=x.device, dtype=x.dtype)
+                    noise = fcfg.cond_noise.to(
+                        device=x.device, dtype=x.dtype)
+                    inj = (1.0 - t) * clean + t * noise
+                else:
+                    # ALG phase: schedule-dependent injection
+                    inj = fcfg.get_injection_latent(progress).to(
+                        device=x.device, dtype=x.dtype)
+
+                # Handle batched CFG (batch may be 2x or Nx)
+                B_inj = inj.shape[0]
+                if B > B_inj:
+                    inj = inj.repeat(
+                        math.ceil(B / B_inj), 1, 1, 1, 1)[:B]
+
+                x[:, :, idx:idx + 1] = inj
+
+            return apply_model_func(x, timestep, **c)
+
+        m.set_model_unet_function_wrapper(alg_unet_wrapper)
+        return (m,)
+
+
+# ════════════════════════════════════════════════════════════════
+#  NODE 3:  LTXVALGPostOverride
+# ════════════════════════════════════════════════════════════════
+
+class LTXVALGPostOverride:
+    """
+    Post-sampling utility: replaces conditioning frame positions
+    in the sampled latent with pixel-perfect clean encoded latents.
+
+    This implements the "first-frame override" technique from the
+    ALG paper — applied AFTER denoising is complete, it ensures
+    the conditioning frames exactly match the input images without
+    any residual denoising drift.
+
+    Connect after SamplerCustomAdvanced, before VAE decode.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "alg_frames": ("ALG_FRAMES",),
+                "enabled": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "override"
+    CATEGORY = "LTXVideo/ALG"
+
+    def override(self, latent, alg_frames, enabled):
+        if not enabled:
+            return (latent,)
+
+        out = copy.deepcopy(latent)
+        samples = out["samples"]  # [B, C, T, H, W]
+
+        for fcfg in alg_frames:
+            idx = fcfg.frame_idx
+            if idx >= samples.shape[2]:
+                continue
+
+            clean = fcfg.clean_latent.to(
+                device=samples.device, dtype=samples.dtype)
+
+            B = samples.shape[0]
+            B_c = clean.shape[0]
+            if B > B_c:
+                clean = clean.repeat(
+                    math.ceil(B / B_c), 1, 1, 1, 1)[:B]
+
+            samples[:, :, idx:idx + 1] = clean
+
+        out["samples"] = samples
+        return (out,)
 
 
 # Node class mappings for ComfyUI
@@ -3380,6 +4355,9 @@ NODE_CLASS_MAPPINGS = {
     "FocusDeconvAdvanced": FocusDeconvAdvanced,
     "SpectrumAcceleration": SpectrumAcceleration,
     "SpectrumBlockAcceleration": SpectrumBlockAcceleration,
+    "LTXVImgToVideoInplaceALG": LTXVImgToVideoInplaceALG,
+    "LTXVALGModelPatch": LTXVALGModelPatch,
+    "LTXVALGPostOverride": LTXVALGPostOverride,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3401,4 +4379,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FocusDeconvAdvanced": "🔍 Focus Deconv - Advanced",
     "SpectrumAcceleration": "Spectrum Acceleration",
     "SpectrumBlockAcceleration": "Spectrum Block Acceleration",
+    "LTXVImgToVideoInplaceALG": "LTXV Img→Video ALG",
+    "LTXVALGModelPatch": "LTXV ALG Model Patch",
+    "LTXVALGPostOverride": "LTXV ALG Post Override",
 }
