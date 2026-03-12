@@ -235,7 +235,7 @@ class EMASyncGuider:
     RETURN_TYPES = ("GUIDER",)
     FUNCTION = "get_guider"
     CATEGORY = "ZLD/sampling/guiders"
-    DESCRIPTION = "EMAG + SyncCFG Hybrid: Combines EMA attention perturbation with decoupled audio-video synchronization guidance for LTX-2 and other audio-video models"
+    DESCRIPTION = "EMAG + SyncCFG Hybrid: Combines EMA attention perturbation with decoupled audio-video synchronization guidance"
     
     def get_guider(self, model, positive, negative, mode, cfg, emag_scale, ema_decay,
                    sync_scale, video_scale, audio_scale,
@@ -626,8 +626,6 @@ class SARFSolverSamplerNode:
     DESCRIPTION = (
         "SA-RF-Solver v2: SDE sampler for Rectified Flow models (LTX-2, Flux, "
         "SD3, Wan, HunyuanVideo). DDIM-eta for RF's linear schedule. "
-        "eta=1.0 + euler predictor = cleanest LTX-2 video. "
-        "Based on Wang et al. (ICML 2025) and Xue et al. (NeurIPS 2023)."
     )
     
     def get_sampler(self, eta, s_noise, predictor, sde_start, sde_end):
@@ -684,8 +682,6 @@ class RFSolverSamplerNode:
     
     DESCRIPTION = (
         "RF-Solver: Deterministic ODE sampler for rectified flow models. "
-        "For best LTX-2 quality, use SA-RF-Solver with eta=1.0 instead. "
-        "Wang et al., arXiv:2411.04746 (ICML 2025)."
     )
     
     def get_sampler(self, order):
