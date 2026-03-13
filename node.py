@@ -485,7 +485,7 @@ class FreqDecompTemporalGuidance:
         out[..., 1::2, 1::2] = ll - lh - hl + hh
         return out
     
-    def apply(self, model, hf_guidance_scale, temporal_consistency_strength,
+    def apply_guider(self, model, hf_guidance_scale, temporal_consistency_strength,
               start_sigma, end_sigma):
         
         prev_hf = [None]  # Store previous frame HF for temporal consistency
@@ -716,11 +716,6 @@ Drop-in replacement that resizes the input image to the target latent
 dimensions WITHOUT center-cropping.  The only change from the stock node
 is  "center" → "disabled"  in the common_upscale call, which forces a
 direct resize (stretch-to-fit) instead of cover-then-crop.
- 
-Install:
-  Place this file in ComfyUI/custom_nodes/comfyui-zld/
-  (alongside an __init__.py that imports NODE_CLASS_MAPPINGS and
-  NODE_DISPLAY_NAME_MAPPINGS from this module)
 """
  
 import torch
