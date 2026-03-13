@@ -61,3 +61,31 @@
     center-cropping.  The only change from the stock node is  "center" → "disabled"  in the 
     common_upscale call, which forces a direct resize (stretch-to-fit) instead of cover-
     then-crop.
+
+---------------------
+
+## LTX Cinema Workflows
+
+| Component | High | Medium | Low | Fast |
+|-----------|------|--------|-----|------|
+| **S2 Guider** | EMASyncGuider HYBRID | EMAGGuider | EMAGGuider | CFGGuider (cfg=1) |
+| **S2 Sampler** | SA-RF-Solver (`rf_solver_2`, η=1.05) | SA-RF-Solver (`rf_solver_2`, η=1.05) | SA-Solver (τ=1.0) | SA-Solver (τ=1.0) |
+| **S3/S4 Guider** | EMASyncGuider HYBRID | EMAGGuider | EMAGGuider | CFGGuider (cfg=1) |
+| **S3/S4 Sampler** | SA-RF-Solver (`euler`, η=1.0) | SA-RF-Solver (`euler`, η=1.0) | SA-Solver (τ=0.2) | SA-Solver (τ=0.2) |
+| **EMAG active** | Yes (via SyncCFG) | Yes (end=0.2) | Yes (end=0.2) | No (end=1.0 = disabled) |
+| **Sync scheduling** | Yes (0.9→0.7) | No | No | No |
+| **Duration (RTX3090)** | ~25m / 5s | ~16m / 5s | ~12m / 5s | ~6m / 5s |
+
+---------------------
+
+## Papers Referenced
+
+| Technique | Paper | arXiv |
+|-----------|-------|-------|
+| RF-Solver | Wang et al., 2024 | [2411.04746](https://arxiv.org/abs/2411.04746) |
+| SA-Solver | Xue et al., NeurIPS 2023 | — |
+| EMAG | Yadav et al., 2025 | [2512.17303](https://arxiv.org/abs/2512.17303) |
+| Enhance-A-Video | NUS HPC AI Lab, 2025 | [2502.07508](https://arxiv.org/abs/2502.07508) |
+| CFG-Zero* | Fan et al., 2025 | [2503.18886](https://arxiv.org/abs/2503.18886) |
+| FDG | 2025 | [2506.19713](https://arxiv.org/abs/2506.19713) |
+| LTX-Video 2 | Lightricks, 2026 | [2601.03233](https://arxiv.org/abs/2601.03233) |
