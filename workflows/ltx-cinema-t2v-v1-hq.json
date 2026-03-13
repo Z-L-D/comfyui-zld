@@ -1264,41 +1264,6 @@
       ]
     },
     {
-      "id": 601,
-      "type": "PrimitiveInt",
-      "pos": [
-        -1380,
-        6940
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            1546
-          ]
-        }
-      ],
-      "title": "Frames",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.16.4",
-        "Node name for S&R": "PrimitiveInt"
-      },
-      "widgets_values": [
-        0,
-        "randomize"
-      ]
-    },
-    {
       "id": 642,
       "type": "SetNode",
       "pos": [
@@ -1310,7 +1275,7 @@
         58
       ],
       "flags": {},
-      "order": 27,
+      "order": 28,
       "mode": 0,
       "inputs": [
         {
@@ -1337,41 +1302,6 @@
       "bgcolor": "#29699c"
     },
     {
-      "id": 602,
-      "type": "PrimitiveInt",
-      "pos": [
-        -1380,
-        7060
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            1547
-          ]
-        }
-      ],
-      "title": "Framerate",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.16.4",
-        "Node name for S&R": "PrimitiveInt"
-      },
-      "widgets_values": [
-        0,
-        "randomize"
-      ]
-    },
-    {
       "id": 641,
       "type": "SetNode",
       "pos": [
@@ -1383,7 +1313,7 @@
         58
       ],
       "flags": {},
-      "order": 28,
+      "order": 29,
       "mode": 0,
       "inputs": [
         {
@@ -1408,41 +1338,6 @@
       ],
       "color": "#1b4669",
       "bgcolor": "#29699c"
-    },
-    {
-      "id": 611,
-      "type": "PrimitiveInt",
-      "pos": [
-        -1380,
-        7300
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 6,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            1549
-          ]
-        }
-      ],
-      "title": "Height",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.16.4",
-        "Node name for S&R": "PrimitiveInt"
-      },
-      "widgets_values": [
-        0,
-        "randomize"
-      ]
     },
     {
       "id": 646,
@@ -1494,7 +1389,7 @@
         58
       ],
       "flags": {},
-      "order": 29,
+      "order": 31,
       "mode": 0,
       "inputs": [
         {
@@ -1519,41 +1414,6 @@
       ],
       "color": "#1b4669",
       "bgcolor": "#29699c"
-    },
-    {
-      "id": 612,
-      "type": "PrimitiveInt",
-      "pos": [
-        -1380,
-        7180
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            1550
-          ]
-        }
-      ],
-      "title": "Width",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.16.4",
-        "Node name for S&R": "PrimitiveInt"
-      },
-      "widgets_values": [
-        0,
-        "randomize"
-      ]
     },
     {
       "id": 490,
@@ -1760,7 +1620,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 8,
+      "order": 4,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1794,7 +1654,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 9,
+      "order": 5,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1828,7 +1688,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 10,
+      "order": 6,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1862,7 +1722,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 11,
+      "order": 7,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1896,7 +1756,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 12,
+      "order": 8,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1930,7 +1790,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 13,
+      "order": 9,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1962,7 +1822,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 14,
+      "order": 10,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -1996,7 +1856,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 15,
+      "order": 11,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -2030,7 +1890,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 16,
+      "order": 12,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -2064,7 +1924,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 17,
+      "order": 13,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -2096,7 +1956,7 @@
         342
       ],
       "flags": {},
-      "order": 31,
+      "order": 27,
       "mode": 0,
       "inputs": [
         {
@@ -2340,7 +2200,7 @@
         930
       ],
       "flags": {},
-      "order": 18,
+      "order": 14,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -2363,7 +2223,7 @@
         310
       ],
       "flags": {},
-      "order": 19,
+      "order": 15,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -2386,7 +2246,7 @@
         270
       ],
       "flags": {},
-      "order": 20,
+      "order": 16,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -2396,6 +2256,146 @@
       ],
       "color": "#432",
       "bgcolor": "#653"
+    },
+    {
+      "id": 601,
+      "type": "PrimitiveInt",
+      "pos": [
+        -1380,
+        6940
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            1546
+          ]
+        }
+      ],
+      "title": "Frames",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.16.4",
+        "Node name for S&R": "PrimitiveInt"
+      },
+      "widgets_values": [
+        121,
+        "fixed"
+      ]
+    },
+    {
+      "id": 602,
+      "type": "PrimitiveInt",
+      "pos": [
+        -1380,
+        7060
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            1547
+          ]
+        }
+      ],
+      "title": "Framerate",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.16.4",
+        "Node name for S&R": "PrimitiveInt"
+      },
+      "widgets_values": [
+        24,
+        "fixed"
+      ]
+    },
+    {
+      "id": 612,
+      "type": "PrimitiveInt",
+      "pos": [
+        -1380,
+        7180
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            1550
+          ]
+        }
+      ],
+      "title": "Width",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.16.4",
+        "Node name for S&R": "PrimitiveInt"
+      },
+      "widgets_values": [
+        1024,
+        "fixed"
+      ]
+    },
+    {
+      "id": 611,
+      "type": "PrimitiveInt",
+      "pos": [
+        -1380,
+        7300
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            1549
+          ]
+        }
+      ],
+      "title": "Height",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.16.4",
+        "Node name for S&R": "PrimitiveInt"
+      },
+      "widgets_values": [
+        1024,
+        "fixed"
+      ]
     }
   ],
   "links": [
