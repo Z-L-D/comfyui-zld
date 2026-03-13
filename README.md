@@ -76,6 +76,7 @@ Drop-in replacement that resizes the input image to the target latent dimensions
 | RF-Solver | Wang et al., 2024 | [2411.04746](https://arxiv.org/abs/2411.04746) |
 | SA-Solver | Xue et al., NeurIPS 2023 | — |
 | EMAG | Yadav et al., 2025 | [2512.17303](https://arxiv.org/abs/2512.17303) |
+| Harmony | Teng Hu et al. 2025 | [2511.21579](https://arxiv.org/abs/2511.21579) |
 | Enhance-A-Video | NUS HPC AI Lab, 2025 | [2502.07508](https://arxiv.org/abs/2502.07508) |
 | CFG-Zero* | Fan et al., 2025 | [2503.18886](https://arxiv.org/abs/2503.18886) |
 | FDG | 2025 | [2506.19713](https://arxiv.org/abs/2506.19713) |

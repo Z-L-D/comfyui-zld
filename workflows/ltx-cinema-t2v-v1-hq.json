@@ -1,7 +1,7 @@
 {
   "id": "34760c34-45aa-4e82-bcff-c04695831038",
   "revision": 0,
-  "last_node_id": 739,
+  "last_node_id": 740,
   "last_link_id": 1792,
   "nodes": [
     {
@@ -2352,29 +2352,6 @@
       "bgcolor": "#653"
     },
     {
-      "id": 739,
-      "type": "MarkdownNote",
-      "pos": [
-        -2100,
-        6650
-      ],
-      "size": [
-        560,
-        240
-      ],
-      "flags": {},
-      "order": 19,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "properties": {},
-      "widgets_values": [
-        "## Papers Referenced\n\n| Technique | Paper | arXiv |\n|-----------|-------|-------|\n| RF-Solver | Wang et al., 2024 | [2411.04746](https://arxiv.org/abs/2411.04746) |\n| SA-Solver | Xue et al., NeurIPS 2023 | — |\n| EMAG | Yadav et al., 2025 | [2512.17303](https://arxiv.org/abs/2512.17303) |\n| Enhance-A-Video | NUS HPC AI Lab, 2025 | [2502.07508](https://arxiv.org/abs/2502.07508) |\n| CFG-Zero* | Fan et al., 2025 | [2503.18886](https://arxiv.org/abs/2503.18886) |\n| FDG | 2025 | [2506.19713](https://arxiv.org/abs/2506.19713) |\n| LTX-Video 2 | Lightricks, 2026 | [2601.03233](https://arxiv.org/abs/2601.03233) |"
-      ],
-      "color": "#432",
-      "bgcolor": "#653"
-    },
-    {
       "id": 737,
       "type": "MarkdownNote",
       "pos": [
@@ -2386,13 +2363,36 @@
         310
       ],
       "flags": {},
-      "order": 20,
+      "order": 19,
       "mode": 0,
       "inputs": [],
       "outputs": [],
       "properties": {},
       "widgets_values": [
         "| Component | High | Medium | Low | Fast |\n|-----------|------|--------|-----|------|\n| **S2 Guider** | EMASyncGuider HYBRID | EMAGGuider | EMAGGuider | CFGGuider (cfg=1) |\n| **S2 Sampler** | SA-RF-Solver (`rf_solver_2`, η=1.05) | SA-RF-Solver (`rf_solver_2`, η=1.05) | SA-Solver (τ=1.0) | SA-Solver (τ=1.0) |\n| **S3/S4 Guider** | EMASyncGuider HYBRID | EMAGGuider | EMAGGuider | CFGGuider (cfg=1) |\n| **S3/S4 Sampler** | SA-RF-Solver (`euler`, η=1.0) | SA-RF-Solver (`euler`, η=1.0) | SA-Solver (τ=0.2) | SA-Solver (τ=0.2) |\n| **EMAG active** | Yes (via SyncCFG) | Yes (end=0.2) | Yes (end=0.2) | No (end=1.0 = disabled) |\n| **Sync scheduling** | Yes (0.9→0.7) | No | No | No |\n| **Duration (RTX3090)** | ~25m / 5s | ~16m / 5s | ~12m / 5s | ~6m / 5s |"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 740,
+      "type": "MarkdownNote",
+      "pos": [
+        -2100,
+        6650
+      ],
+      "size": [
+        560,
+        270
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "## Papers Referenced\n\n| Technique | Paper | arXiv |\n|-----------|-------|-------|\n| RF-Solver | Wang et al., 2024 | [2411.04746](https://arxiv.org/abs/2411.04746) |\n| SA-Solver | Xue et al., NeurIPS 2023 | — |\n| EMAG | Yadav et al., 2025 | [2512.17303](https://arxiv.org/abs/2512.17303) |\n| Harmony | Teng Hu et al. 2025 | [2511.21579](https://arxiv.org/abs/2511.21579) |\n| Enhance-A-Video | NUS HPC AI Lab, 2025 | [2502.07508](https://arxiv.org/abs/2502.07508) |\n| CFG-Zero* | Fan et al., 2025 | [2503.18886](https://arxiv.org/abs/2503.18886) |\n| FDG | 2025 | [2506.19713](https://arxiv.org/abs/2506.19713) |\n| LTX-Video 2 | Lightricks, 2026 | [2601.03233](https://arxiv.org/abs/2601.03233) |"
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -3003,7 +3003,7 @@
         "version": 1,
         "state": {
           "lastGroupId": 66,
-          "lastNodeId": 739,
+          "lastNodeId": 740,
           "lastLinkId": 1792,
           "lastRerouteId": 0
         },
@@ -4980,7 +4980,7 @@
         "version": 1,
         "state": {
           "lastGroupId": 66,
-          "lastNodeId": 739,
+          "lastNodeId": 740,
           "lastLinkId": 1792,
           "lastRerouteId": 0
         },
@@ -7136,7 +7136,7 @@
         "version": 1,
         "state": {
           "lastGroupId": 66,
-          "lastNodeId": 739,
+          "lastNodeId": 740,
           "lastLinkId": 1792,
           "lastRerouteId": 0
         },
@@ -9281,7 +9281,7 @@
         "version": 1,
         "state": {
           "lastGroupId": 66,
-          "lastNodeId": 739,
+          "lastNodeId": 740,
           "lastLinkId": 1792,
           "lastRerouteId": 0
         },
@@ -11259,10 +11259,10 @@
     "VHS_MetadataImage": true,
     "VHS_KeepIntermediate": true,
     "ds": {
-      "scale": 0.6727499949325899,
+      "scale": 0.6727499949325902,
       "offset": [
-        2649.2330758906255,
-        -5075.23544663264
+        2943.2852856494997,
+        -6089.3207541632
       ]
     }
   },
