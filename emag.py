@@ -9,7 +9,8 @@ class EMAGGuiderImpl(comfy.samplers.CFGGuider):
     
     EMA state is persisted on the model_patcher object so it survives
     guider recreation across separate sampler calls (e.g. scheduled CFG
-    workflows that run multiple 1-step samplers).
+    workflows that run multiple 1-step samplers) and then resets if when 
+    the sigma schedule increases in value.
     """
     
     # Class-level key for storing EMA state on the model_patcher
