@@ -18,6 +18,9 @@ class EMASyncGuiderImpl(comfy.samplers.CFGGuider):
     Final: ε = ε_uncond + s_v*(ε_v - ε_uncond) + s_a*(ε_a - ε_uncond) + s_sync*(ε_sync - ε_uncond)
     
     Where ε_sync is computed to preserve audio-video correspondence.
+
+    This was written to work with LTX2 and very possibly will fail with other
+    joint audio/video models depending on how they handle the dual latents.
     """
     
     # Class-level keys for persistent state
