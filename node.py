@@ -4,8 +4,6 @@ import torch
 import torch.nn.functional as F
 import comfy.samplers
 import comfy.utils
-from comfy_api import io
-
 
 from .emag import EMAGGuiderImpl
 from .emasync import EMASyncGuiderImpl
@@ -450,7 +448,7 @@ class FreqDecompTemporalGuidance:
         }
     
     RETURN_TYPES = ("MODEL",)
-    FUNCTION = "apply_guider"
+    FUNCTION = "apply"
     CATEGORY = "ZLD/sampling/guiders"
     
     def haar_wavelet_2d(self, x):
