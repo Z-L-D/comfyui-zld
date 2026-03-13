@@ -3,6 +3,8 @@
 import torch
 import torch.nn.functional as F
 import comfy.samplers
+import comfy.utils
+from comfy_api import io
 
 
 from .emag import EMAGGuiderImpl
@@ -703,6 +705,93 @@ class RFSolverSamplerNode:
 # :: ==========================================================================
 # :: ==========================================================================
 # ::
+# :: LTXVImgToVideoInplaceNoCrop
+# :: 
+# :: ==========================================================================
+# :: ==========================================================================
+"""
+LTXVImgToVideoInplace — No-Crop variant (classic API)
+ 
+Drop-in replacement that resizes the input image to the target latent
+dimensions WITHOUT center-cropping.  The only change from the stock node
+is  "center" → "disabled"  in the common_upscale call, which forces a
+direct resize (stretch-to-fit) instead of cover-then-crop.
+ 
+Install:
+  Place this file in ComfyUI/custom_nodes/comfyui-zld/
+  (alongside an __init__.py that imports NODE_CLASS_MAPPINGS and
+  NODE_DISPLAY_NAME_MAPPINGS from this module)
+"""
+ 
+import torch
+import comfy.utils
+ 
+ 
+class LTXVImgToVideoInplaceNoCrop:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "vae": ("VAE",),
+                "image": ("IMAGE",),
+                "latent": ("LATENT",),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {
+                "bypass": ("BOOLEAN", {"default": False, "tooltip": "Bypass the conditioning."}),
+            },
+        }
+ 
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "execute"
+    CATEGORY = "conditioning/video_models"
+ 
+    def execute(self, vae, image, latent, strength, bypass=False):
+        if bypass:
+            return (latent,)
+ 
+        samples = latent["samples"]
+        _, height_scale_factor, width_scale_factor = (
+            vae.downscale_index_formula
+        )
+ 
+        batch, _, latent_frames, latent_height, latent_width = samples.shape
+        width = latent_width * width_scale_factor
+        height = latent_height * height_scale_factor
+ 
+        if image.shape[1] != height or image.shape[2] != width:
+            # ===== THE FIX =====
+            # "disabled" = direct resize to exact target dims, no crop.
+            # Stock node uses "center" which scales-to-cover then center-crops.
+            pixels = comfy.utils.common_upscale(
+                image.movedim(-1, 1),
+                width,
+                height,
+                "bilinear",
+                "disabled",      # was "center"
+            ).movedim(1, -1)
+        else:
+            pixels = image
+ 
+        encode_pixels = pixels[:, :, :, :3]
+        t = vae.encode(encode_pixels)
+ 
+        samples[:, :, :t.shape[2]] = t
+ 
+        conditioning_latent_frames_mask = torch.ones(
+            (batch, 1, latent_frames, 1, 1),
+            dtype=torch.float32,
+            device=samples.device,
+        )
+        conditioning_latent_frames_mask[:, :, :t.shape[2]] = 1.0 - strength
+ 
+        return ({"samples": samples, "noise_mask": conditioning_latent_frames_mask},)
+
+
+
+# :: ==========================================================================
+# :: ==========================================================================
+# ::
 # :: Node Registration
 # :: 
 # :: ==========================================================================
@@ -715,6 +804,7 @@ NODE_CLASS_MAPPINGS = {
     "FreqDecompTemporalGuidance": FreqDecompTemporalGuidance,
     "SARFSolverSampler": SARFSolverSamplerNode,
     "RFSolverSampler": RFSolverSamplerNode,
+    "LTXVImgToVideoInplaceNoCrop": LTXVImgToVideoInplaceNoCrop,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -724,4 +814,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FreqDecompTemporalGuidance": "Frequency-Decomposed Temporal Guidance",
     "SARFSolverSampler": "SA-RF-Solver Sampler",
     "RFSolverSampler": "RF-Solver Sampler",
+    "LTXVImgToVideoInplaceNoCrop": "LTXV Img2Vid Inplace (No Crop)",
 }
