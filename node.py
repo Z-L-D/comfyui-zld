@@ -448,7 +448,7 @@ class FreqDecompTemporalGuidance:
         }
     
     RETURN_TYPES = ("MODEL",)
-    FUNCTION = "apply"
+    FUNCTION = "apply_guider"
     CATEGORY = "ZLD/sampling/guiders"
     
     def haar_wavelet_2d(self, x):
